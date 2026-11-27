@@ -1,0 +1,76 @@
+{
+  "name": "electron-taskbar-widget",
+  "version": "0.1.0",
+  "description": "Embed transparent Electron BrowserWindow widgets into the Windows 10/11 taskbar using koffi FFI and UI Automation.",
+  "license": "MIT",
+  "author": "Dreamisle-Dev",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./src/index.js"
+    },
+    "./win32": {
+      "types": "./types/index.d.ts",
+      "import": "./src/win32.js"
+    },
+    "./layout": {
+      "types": "./types/index.d.ts",
+      "import": "./src/layout.js"
+    },
+    "./gap-probe": {
+      "types": "./types/index.d.ts",
+      "import": "./src/gap-probe.js"
+    },
+    "./legacy": {
+      "types": "./types/index.d.ts",
+      "import": "./src/legacy-layout.js"
+    }
+  },
+  "types": "./types/index.d.ts",
+  "files": [
+    "src",
+    "types",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "electron": ">=28.0.0",
+    "koffi": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    },
+    "koffi": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "electron",
+    "windows",
+    "taskbar",
+    "widget",
+    "win32",
+    "koffi",
+    "ui-automation",
+    "win10",
+    "win11",
+    "dreamisle"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dreameisle-Dev/electron-taskbar-widget.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Dreameisle-Dev/electron-taskbar-widget/issues"
+  },
+  "homepage": "https://github.com/Dreameisle-Dev/electron-taskbar-widget#readme"
+}

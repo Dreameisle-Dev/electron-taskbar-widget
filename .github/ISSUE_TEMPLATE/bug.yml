@@ -1,0 +1,41 @@
+name: Compatibility / Bug
+description: 反馈 Windows 任务栏嵌入失败、位置偏移、闪烁或兼容性问题
+title: "[Bug] "
+labels: ["bug"]
+assignees: ["HuanMeng-official"]
+
+body:
+  - type: input
+    id: os
+    attributes:
+      label: Windows 版本与构建号
+      placeholder: 例如：Windows 11 24H2 (26100) / Windows 10 22H2 (19045)
+    validations:
+      required: true
+
+  - type: input
+    id: display
+    attributes:
+      label: 显示器、DPI 缩放与任务栏设置
+      placeholder: 例如：双屏 2560x1440@150% + 1920x1080@100%，任务栏居中/底部
+    validations:
+      required: true
+
+  - type: input
+    id: customizer
+    attributes:
+      label: 第三方任务栏工具（如有）
+      placeholder: 例如：无 / ExplorerPatcher / StartAllBack / Windhawk
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 现象描述与复现步骤
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 诊断日志（可选）
+      render: shell
