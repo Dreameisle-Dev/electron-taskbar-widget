@@ -35,6 +35,10 @@ const SWP_NOSIZE = 0x1;
 const SWP_NOMOVE = 0x2;
 const SWP_NOZORDER = 0x4;
 const SWP_NOACTIVATE = 0x10;
+const SWP_FRAMECHANGED = 0x20;
+const HWND_TOP = 0;
+const HWND_TOPMOST = -1;
+const GW_HWNDPREV = 3;
 const GW_OWNER = 4;
 const GA_PARENT = 1;
 const GWLP_HWNDPARENT = -8;
@@ -126,7 +130,7 @@ function ensureNative() {
         'intptr_t __stdcall SetWindowLongPtrW(void *hWnd, int nIndex, intptr_t dwNewLong)'
       ),
       SetWindowPos: user32Lib.func(
-        'bool __stdcall SetWindowPos(void *hWnd, void *hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags)'
+        'bool __stdcall SetWindowPos(void *hWnd, intptr_t hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags)'
       ),
       ShowWindow: user32Lib.func('bool __stdcall ShowWindow(void *hWnd, int nCmdShow)'),
       IsWindow: user32Lib.func('bool __stdcall IsWindow(void *hWnd)'),
@@ -522,6 +526,17 @@ export function embedWindow(hwnd, trayHwnd) {
     }
     user32.SetWindowLongW(h, GWL_EXSTYLE, exStyle);
 
+    // 刷新窗口样式缓存，确保后续定位与内容区尺寸计算按无框样式生效。
+    user32.SetWindowPos(
+      h,
+      HWND_TOP,
+      0,
+      0,
+      0,
+      0,
+      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED
+    );
+
     if (isLegacyBuild()) {
       return Boolean(user32.IsWindow(h));
     }
@@ -556,17 +571,20 @@ export function getWindowStyleInfo(hwnd) {
 }
 
 /**
- * 通过 `SetWindowPos` 更新窗口物理坐标与尺寸，不改变 z-order 也不抢占焦点。
+ * 通过 `SetWindowPos` 更新窗口物理坐标（及可选尺寸），不改变 z-order 也不抢占焦点。
+ * 省略 `width`/`height` 时仅移动位置（`SWP_NOSIZE`），避免触发多余尺寸重排。
  * 子窗口使用父客户区坐标，顶层 overlay 使用屏幕坐标。
  */
-export function setWindowBounds(hwnd, { x, y, width, height }) {
+export function setWindowBounds(hwnd, { x, y, width = null, height = null }) {
   if (!ensureNative()) return false;
   const h = asHwnd(hwnd);
   if (!h) return false;
 
   try {
+    const resize = Number.isFinite(width) && Number.isFinite(height);
+    const flags = (resize ? 0 : SWP_NOSIZE) | SWP_NOZORDER | SWP_NOACTIVATE;
     return Boolean(
-      user32.SetWindowPos(h, null, x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE)
+      user32.SetWindowPos(h, HWND_TOP, x, y, resize ? width : 0, resize ? height : 0, flags)
     );
   } catch {
     return false;
@@ -594,8 +612,50 @@ export function assertTopChild(hwnd) {
 
   try {
     return Boolean(
-      user32.SetWindowPos(h, null, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+      user32.SetWindowPos(h, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
     );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 将 Windows 10 顶层 `WS_POPUP` 窗口重新提到 `HWND_TOPMOST` 栈顶（不移动、不改尺寸、不激活）。
+ * 当点击任务栏或压缩任务列表导致 `Shell_TrayWnd` 升至歌词窗上方时用于无闪烁恢复置顶。
+ */
+export function assertTopmost(hwnd) {
+  if (!ensureNative()) return false;
+  const h = asHwnd(hwnd);
+  if (!h) return false;
+
+  try {
+    return Boolean(
+      user32.SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 判断顶层窗口 `hwnd` 在 Win32 Z 序中是否严格位于 `referenceHwnd` 之上。
+ * 从 `referenceHwnd` 沿 `GW_HWNDPREV` 向上遍历（最多 512 步），避免无谓重复置顶导致闪烁。
+ */
+export function isWindowAbove(hwnd, referenceHwnd) {
+  if (!ensureNative()) return false;
+  const target = asHwnd(hwnd);
+  const ref = asHwnd(referenceHwnd);
+  if (!target || !ref || target === ref) return false;
+
+  try {
+    let current = asHwnd(user32.GetWindow(ref, GW_HWNDPREV));
+    let steps = 0;
+    while (current && steps < 512) {
+      if (current === target) return true;
+      current = asHwnd(user32.GetWindow(current, GW_HWNDPREV));
+      steps += 1;
+    }
+    return false;
   } catch {
     return false;
   }

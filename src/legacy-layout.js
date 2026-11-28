@@ -78,7 +78,18 @@ export function createLegacyLayoutController({
   logger = null,
   fixedStripCss = FIXED_STRIP_CSS,
   dockMarginCss = DOCK_MARGIN_CSS,
+  native = null,
 } = {}) {
+  const win32 = {
+    findTaskbarContainer,
+    findTaskList,
+    findTrayNotify,
+    getTaskbarMetrics,
+    getWindowRect,
+    isWindow,
+    moveWindow,
+    ...native,
+  };
   let usable = true;
   let state = freshState();
   let lastLogKey = '';
@@ -107,12 +118,12 @@ export function createLegacyLayoutController({
       clearReservation();
       return;
     }
-    if (!taskListHwnd || !isWindow(taskListHwnd) || !rebarHwnd || !isWindow(rebarHwnd)) {
+    if (!taskListHwnd || !win32.isWindow(taskListHwnd) || !rebarHwnd || !win32.isWindow(rebarHwnd)) {
       clearReservation();
       return;
     }
 
-    const rebarMetrics = getTaskbarMetrics(rebarHwnd);
+    const rebarMetrics = win32.getTaskbarMetrics(rebarHwnd);
     if (!rebarMetrics) {
       clearReservation();
       return;
@@ -131,7 +142,7 @@ export function createLegacyLayoutController({
       Math.min(rebarMetrics.clientHeight - y, Math.round(baseline.height * scaleY))
     );
 
-    if (moveWindow(taskListHwnd, { x, y, width, height })) {
+    if (win32.moveWindow(taskListHwnd, { x, y, width, height })) {
       log('Win10 layout: task list restored', {
         taskListHwnd: String(taskListHwnd),
         width,
@@ -163,7 +174,7 @@ export function createLegacyLayoutController({
     if (!(Number(widthCss) > 0)) return { ok: false, reason: 'waiting' };
 
     const tray = trayHwnd;
-    const rebarHwnd = findTaskbarContainer(tray);
+    const rebarHwnd = win32.findTaskbarContainer(tray);
     if (!rebarHwnd) {
       usable = false;
       logOnce('Win10 layout unsupported: ReBarWindow32 not found', {
@@ -172,7 +183,7 @@ export function createLegacyLayoutController({
       return { ok: false, reason: 'unsupported' };
     }
 
-    const taskListHwnd = findTaskList(rebarHwnd);
+    const taskListHwnd = win32.findTaskList(rebarHwnd);
     if (!taskListHwnd) {
       usable = false;
       logOnce('Win10 layout unsupported: task list not found', {
@@ -193,7 +204,7 @@ export function createLegacyLayoutController({
     state.rebarHwnd = rebarHwnd;
     state.taskListHwnd = taskListHwnd;
 
-    let rebarMetrics = getTaskbarMetrics(rebarHwnd);
+    let rebarMetrics = win32.getTaskbarMetrics(rebarHwnd);
     if (!rebarMetrics) {
       logOnce('Win10 layout unavailable: rebar metrics missing', {
         rebarHwnd: String(rebarHwnd),
@@ -204,12 +215,12 @@ export function createLegacyLayoutController({
     // 高度变化（DPI/小任务栏切换）时恢复基线并重算，避免多次压缩叠加漂移。
     if (state.squeezed && state.baseline && rebarMetrics.clientHeight !== state.lastRebarHeight) {
       restore();
-      rebarMetrics = getTaskbarMetrics(rebarHwnd);
+      rebarMetrics = win32.getTaskbarMetrics(rebarHwnd);
       if (!rebarMetrics) return { ok: false, reason: 'unsupported' };
       state.reserveMode = 'stable';
     }
 
-    const taskbarMetrics = getTaskbarMetrics(tray);
+    const taskbarMetrics = win32.getTaskbarMetrics(tray);
     if (!taskbarMetrics) {
       logOnce('Win10 layout unavailable: taskbar metrics missing', {
         trayHwnd: String(tray),
@@ -217,7 +228,7 @@ export function createLegacyLayoutController({
       return { ok: false, reason: 'unsupported' };
     }
 
-    const taskListRect = getWindowRect(taskListHwnd);
+    const taskListRect = win32.getWindowRect(taskListHwnd);
     if (!taskListRect) {
       logOnce('Win10 layout unavailable: task list rect missing', {
         taskListHwnd: String(taskListHwnd),
@@ -257,7 +268,7 @@ export function createLegacyLayoutController({
     const vertical =
       taskbarMetrics.vertical === true || rebarMetrics.clientHeight > rebarMetrics.clientWidth;
 
-    const trayRect = getWindowRect(findTrayNotify(tray));
+    const trayRect = win32.getWindowRect(win32.findTrayNotify(tray));
     const rightLimitPx =
       trayRect && trayRect.left > rebarMetrics.screenLeft
         ? trayRect.left - rebarMetrics.screenLeft
@@ -288,15 +299,18 @@ export function createLegacyLayoutController({
       });
       return { ok: false, reason: 'no-space' };
     }
-    const stripLengthPx = Math.max(1, Math.round(stripLengthCss * dpi));
 
-    const preferredFixedCss =
-      Number.isFinite(fixedStripCss) && fixedStripCss > 0 ? fixedStripCss : stripLengthCss;
+    // 固定长度模式下将组件长度严格封顶在 `fixedStripCss`（超长文本交给渲染器跑马灯滚动），
+    // 防止长歌词把窗口撑宽并反复挤压 Win10 任务栏图标。
+    const hasFixedLength = Number.isFinite(fixedStripCss) && fixedStripCss > 0;
     const maxReserveCss = Math.max(0, usableLongAxisCss - 2 * dockMarginCss);
-    const stableReserveCss = Math.min(
-      Math.max(stripLengthCss, preferredFixedCss),
-      Math.max(stripLengthCss, maxReserveCss)
-    );
+    const effectiveStripCss = hasFixedLength
+      ? Math.min(stripLengthCss, fixedStripCss)
+      : stripLengthCss;
+    const stripLengthPx = Math.max(1, Math.round(effectiveStripCss * dpi));
+    const stableReserveCss = hasFixedLength
+      ? Math.max(effectiveStripCss, Math.min(fixedStripCss, maxReserveCss))
+      : effectiveStripCss;
     const stableReservePx = Math.max(stripLengthPx, Math.round(stableReserveCss * dpi));
 
     const baseLayoutInput = {
@@ -398,37 +412,44 @@ export function createLegacyLayoutController({
 
     let taskListMoved = false;
     if (layout.taskList) {
+      const currentTaskListRect = {
+        x: taskListRect.left - rebarMetrics.screenLeft,
+        y: taskListRect.top - rebarMetrics.screenTop,
+        width: taskListRect.right - taskListRect.left,
+        height: taskListRect.bottom - taskListRect.top,
+      };
       if (!state.baseline) {
         state.baseline = {
-          x: taskListRect.left - rebarMetrics.screenLeft,
-          y: taskListRect.top - rebarMetrics.screenTop,
-          width: taskListRect.right - taskListRect.left,
-          height: taskListRect.bottom - taskListRect.top,
+          ...currentTaskListRect,
           rebarWidth: rebarMetrics.clientWidth,
           rebarHeight: rebarMetrics.clientHeight,
         };
       }
-      if (!sameRect(state.lastTaskListRect, layout.taskList)) {
-        if (!moveWindow(taskListHwnd, layout.taskList)) {
+      // 按实时原生几何而非仅按上次目标比对：Explorer 刷新把任务列表拉回满宽时必须重新压缩。
+      if (!sameRect(currentTaskListRect, layout.taskList)) {
+        if (!win32.moveWindow(taskListHwnd, layout.taskList)) {
           logOnce('Win10 layout: failed to resize the task list', {
             taskListHwnd: String(taskListHwnd),
             target: layout.taskList,
           });
           return { ok: false, reason: 'move-failed' };
         }
+        const targetChanged = !sameRect(state.lastTaskListRect, layout.taskList);
         state.lastTaskListRect = layout.taskList;
         taskListMoved = true;
-        log('Win10 layout: task list squeezed for the taskbar widget', {
-          taskListHwnd: String(taskListHwnd),
-          oldWidth: state.baseline.width,
-          oldHeight: state.baseline.height,
-          newWidth: layout.taskList.width,
-          newHeight: layout.taskList.height,
-          stripLengthPx,
-          reservePx,
-          vertical,
-          bounds: layout.strip,
-        });
+        if (targetChanged) {
+          log('Win10 layout: task list squeezed for the taskbar widget', {
+            taskListHwnd: String(taskListHwnd),
+            oldWidth: state.baseline.width,
+            oldHeight: state.baseline.height,
+            newWidth: layout.taskList.width,
+            newHeight: layout.taskList.height,
+            stripLengthPx,
+            reservePx,
+            vertical,
+            bounds: layout.strip,
+          });
+        }
       }
       state.squeezed = true;
     }

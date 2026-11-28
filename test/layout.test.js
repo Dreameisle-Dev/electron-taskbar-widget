@@ -4,7 +4,9 @@ import {
   clampWindowWidth,
   computeLegacyTaskbarLayout,
   computeLegacyVerticalTaskbarLayout,
+  createLegacyLayoutController,
   DOCK_MARGIN_CSS,
+  FIXED_STRIP_CSS,
   MIN_WINDOW_CSS,
   selectGap,
   shouldCoalesceProbe,
@@ -139,4 +141,103 @@ test('computeLegacyVerticalTaskbarLayout computes vertical strip and task list s
     strip: { x: 0, y: 48 + (900 - 8 - 300), width: 62, height: 300 },
     taskList: { x: 0, y: 0, width: 62, height: 900 - (300 + 16) },
   });
+});
+
+test('createLegacyLayoutController keeps fixed length capped on long lyrics and re-squeezes after Explorer reset', () => {
+  const TRAY = 65950n;
+  const REBAR = 131400n;
+  const TASKLIST = 131470n;
+  const NOTIFY = 131500n;
+
+  // 模拟 Win10 1920x1080 40px 任务栏（与真实诊断日志一致）
+  let liveTaskListRect = { left: 392, top: 1040, right: 1662, bottom: 1080 };
+  const moves = [];
+  const logs = [];
+
+  const controller = createLegacyLayoutController({
+    fixedStripCss: FIXED_STRIP_CSS,
+    logger: (message, details) => logs.push({ message, details }),
+    native: {
+      findTaskbarContainer: () => REBAR,
+      findTaskList: () => TASKLIST,
+      findTrayNotify: () => NOTIFY,
+      isWindow: () => true,
+      getTaskbarMetrics: (hwnd) => {
+        if (hwnd === TRAY) {
+          return {
+            screenLeft: 0,
+            screenTop: 1040,
+            clientWidth: 1920,
+            clientHeight: 40,
+            vertical: false,
+            dpiScale: 1,
+          };
+        }
+        if (hwnd === REBAR) {
+          return {
+            screenLeft: 392,
+            screenTop: 1040,
+            clientWidth: 1270,
+            clientHeight: 40,
+            vertical: false,
+            dpiScale: 1,
+          };
+        }
+        return null;
+      },
+      getWindowRect: (hwnd) => {
+        if (hwnd === TASKLIST) return { ...liveTaskListRect };
+        if (hwnd === NOTIFY) return { left: 1662, top: 1040, right: 1920, bottom: 1080 };
+        return null;
+      },
+      moveWindow: (hwnd, rect) => {
+        moves.push({ hwnd, rect });
+        if (hwnd === TASKLIST) {
+          liveTaskListRect = {
+            left: 392 + rect.x,
+            top: 1040 + rect.y,
+            right: 392 + rect.x + rect.width,
+            bottom: 1040 + rect.y + rect.height,
+          };
+        }
+        return true;
+      },
+    },
+  });
+
+  // 1) 短歌词行：固定预留 400px，任务列表从 1270 压缩到 854
+  const first = controller.apply({ trayHwnd: TRAY, widthCss: 300 });
+  assert.equal(first.ok, true);
+  assert.equal(first.bounds.width, 400);
+  assert.equal(first.bounds.x, 1254);
+  assert.equal(first.taskListMoved, true);
+  assert.equal(moves.length, 1);
+  assert.equal(moves[0].rect.width, 854);
+
+  // 2) 长歌词行（482px > 400px）：固定宽度模式必须封顶在 400px，不能再次移动任务列表
+  const longLine = controller.apply({ trayHwnd: TRAY, widthCss: 482 });
+  assert.equal(longLine.ok, true);
+  assert.equal(longLine.bounds.width, 400);
+  assert.equal(longLine.bounds.x, 1254);
+  assert.equal(longLine.taskListMoved, false);
+  assert.equal(moves.length, 1);
+
+  // 3) Explorer 将 MSTaskSwWClass 拉回满宽 1270：下一次 apply 必须检测到实时宽度变化并重新压缩
+  liveTaskListRect = { left: 392, top: 1040, right: 1662, bottom: 1080 };
+  const afterReset = controller.apply({ trayHwnd: TRAY, widthCss: 300 });
+  assert.equal(afterReset.ok, true);
+  assert.equal(afterReset.taskListMoved, true);
+  assert.equal(moves.length, 2);
+  assert.equal(moves[1].rect.width, 854);
+  // 目标宽度未变时不重复刷屏日志
+  assert.equal(
+    logs.filter((entry) => entry.message === 'Win10 layout: task list squeezed for the taskbar widget')
+      .length,
+    1
+  );
+
+  // 4) restore() 恢复任务列表至基线宽度 1270
+  controller.restore();
+  assert.equal(moves.length, 3);
+  assert.equal(moves[2].rect.width, 1270);
 });

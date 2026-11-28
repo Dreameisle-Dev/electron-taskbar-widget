@@ -13,6 +13,7 @@
 import { createRequire } from 'node:module';
 import {
   assertTopChild,
+  assertTopmost,
   embedWindow,
   findTaskbar,
   findTrayNotify,
@@ -30,6 +31,7 @@ import {
   hideWindow,
   isFullscreenForeground,
   isWindow,
+  isWindowAbove,
   isWindowVisible,
   listTaskbars,
   readSystemUsesLightTheme,
@@ -44,6 +46,7 @@ import {
   shouldCoalesceProbe,
   shouldShow,
   sideFor,
+  WINDOW_PADDING_CSS,
 } from './layout.js';
 import { createLegacyLayoutController, isLegacyWindows } from './legacy-layout.js';
 import { probeTaskbar } from './gap-probe.js';
@@ -125,7 +128,7 @@ export function createTaskbarWidget(options = {}) {
 
   const legacyLayout = createLegacyLayoutController({
     logger: log,
-    fixedStripCss: fixedStripCss || FIXED_STRIP_CSS,
+    fixedStripCss,
   });
 
   // 运行时窗口与布局状态
@@ -140,6 +143,7 @@ export function createTaskbarWidget(options = {}) {
   let currentGap = null;
   let fallbackMetrics = null;
   let lastWindowKey = null;
+  let lastContentSizeKey = null;
   let lightTaskbar = null;
   let verticalTaskbar = false;
   let fixedAlign = 'end';
@@ -177,6 +181,10 @@ export function createTaskbarWidget(options = {}) {
     return isWindowAlive(win) && hwnd !== null && isWindow(hwnd);
   }
 
+  function defaultLightTaskbar() {
+    return readSystemUsesLightTheme() ?? !isLegacyWindows();
+  }
+
   function getState() {
     return {
       enabled,
@@ -184,7 +192,7 @@ export function createTaskbarWidget(options = {}) {
       visible,
       vertical: verticalTaskbar,
       align: fixedAlign,
-      lightTaskbar: lightTaskbar ?? readSystemUsesLightTheme() ?? true,
+      lightTaskbar: lightTaskbar ?? defaultLightTaskbar(),
       legacy: isLegacyWindows(),
       fullscreen,
     };
@@ -228,8 +236,16 @@ export function createTaskbarWidget(options = {}) {
     const taskbarMetrics = legacy && trayHwnd ? getTaskbarMetrics(trayHwnd) : null;
     const x = base.x + (taskbarMetrics ? taskbarMetrics.screenLeft : 0);
     const y = base.y + (taskbarMetrics ? taskbarMetrics.screenTop : 0);
-    const key = `${scale}:${x},${y},${contentWidth}x${contentHeight}`;
+    const sizeKey = `${scale}:${contentWidth}x${contentHeight}`;
+    const key = `${sizeKey}@${x},${y}`;
     if (!force && key === lastWindowKey) return true;
+
+    const needsResize = force || sizeKey !== lastContentSizeKey;
+    if (!needsResize) {
+      if (!setWindowBounds(hwnd, { x, y })) return false;
+      lastWindowKey = key;
+      return true;
+    }
 
     let nativeRect = null;
     try {
@@ -247,6 +263,7 @@ export function createTaskbarWidget(options = {}) {
     };
     if (!setWindowBounds(hwnd, next)) return false;
 
+    lastContentSizeKey = sizeKey;
     lastWindowKey = key;
     return true;
   }
@@ -370,18 +387,31 @@ export function createTaskbarWidget(options = {}) {
     });
   }
 
-  function ensureLegacyTopmost() {
+  function ensureLegacyTopmost(forceRaise = false) {
     if (!isLegacyWindows() || !isWindowAlive(win) || !hwnd) return;
-    if (getWindowStyleInfo(hwnd)?.topmost === true) return;
-    try {
-      win.setAlwaysOnTop(true);
-    } catch {
-      // 下一轮可见性同步会重试
+    const needsTopmostFlag = getWindowStyleInfo(hwnd)?.topmost !== true;
+    if (needsTopmostFlag) {
+      try {
+        win.setAlwaysOnTop(true, 'screen-saver');
+      } catch {
+        try {
+          win.setAlwaysOnTop(true);
+        } catch {
+          // 下一轮可见性同步会重试
+        }
+      }
+    }
+    // 即使 WS_EX_TOPMOST 仍为真，点击任务栏或压缩任务列表也可能让 Shell_TrayWnd 升到歌词窗上方；
+    // 仅在确实掉到任务栏下方或刚移动任务列表时才提升，既防遮挡又避免周期性闪烁。
+    const behindTaskbar = Boolean(trayHwnd && !isWindowAbove(hwnd, trayHwnd));
+    if (forceRaise || needsTopmostFlag || behindTaskbar) {
+      assertTopmost(hwnd);
     }
   }
 
   function effectiveDesiredWidthCss() {
-    return fixedStripCss > 0 ? Math.max(widthCss, fixedStripCss) : widthCss;
+    if (fixedStripCss > 0) return Math.max(1, fixedStripCss - 2 * WINDOW_PADDING_CSS);
+    return widthCss;
   }
 
   function applyFallbackPosition(metrics, force) {
@@ -441,7 +471,7 @@ export function createTaskbarWidget(options = {}) {
     );
   }
 
-  function updateVisibility() {
+  function updateVisibility(forceRaiseLegacy = false) {
     if (!isWindowAlive(win)) {
       visible = false;
       return;
@@ -466,13 +496,13 @@ export function createTaskbarWidget(options = {}) {
     const wasShown = win.isVisible() || nativeVisible;
     if (!wasShown) {
       applyPosition(true);
-      if (isLegacyWindows()) ensureLegacyTopmost();
+      if (isLegacyWindows()) ensureLegacyTopmost(true);
       win.showInactive();
     }
     visible = true;
     applyPosition(!wasShown);
     if (isLegacyWindows()) {
-      ensureLegacyTopmost();
+      ensureLegacyTopmost(forceRaiseLegacy || !wasShown);
     } else {
       assertTopChild(hwnd);
     }
@@ -497,6 +527,11 @@ export function createTaskbarWidget(options = {}) {
       return false;
     }
 
+    if (fullscreen) {
+      updateVisibility();
+      return false;
+    }
+
     const result = legacyLayout.apply({ trayHwnd, widthCss });
     if (result.ok) {
       setAlign('end');
@@ -506,8 +541,8 @@ export function createTaskbarWidget(options = {}) {
       }
       currentGap = { side: 'right', legacy: true, bounds: result.bounds };
       fallbackMetrics = null;
-      setLightTaskbar(readSystemUsesLightTheme() ?? true);
-      updateVisibility();
+      setLightTaskbar(defaultLightTaskbar());
+      updateVisibility(result.taskListMoved);
       return true;
     }
 
@@ -598,7 +633,7 @@ export function createTaskbarWidget(options = {}) {
     }
 
     setAlign(side === 'left' ? 'start' : 'end');
-    setLightTaskbar(probe.lightTaskbar ?? readSystemUsesLightTheme() ?? true);
+    setLightTaskbar(probe.lightTaskbar ?? defaultLightTaskbar());
 
     if (!gap) {
       currentGap = null;
@@ -679,7 +714,10 @@ export function createTaskbarWidget(options = {}) {
         else if (key !== lastTaskbarMetrics) scheduleMetricsRecreate();
       }
 
-      if (!isLegacyWindows() && visible && hwnd && isWindow(hwnd)) assertTopChild(hwnd);
+      if (visible && !fullscreen && hwnd && isWindow(hwnd)) {
+        if (isLegacyWindows()) ensureLegacyTopmost(false);
+        else assertTopChild(hwnd);
+      }
       if (isLegacyWindows() && legacyLayout.isUsable()) probeAndApply();
 
       const fingerprint = getTaskbarWindowsFingerprint();
@@ -708,6 +746,7 @@ export function createTaskbarWidget(options = {}) {
 
   function onDisplayMetrics() {
     lastWindowKey = null;
+    lastContentSizeKey = null;
     if (targetTaskbarChanged()) return;
     scheduleMetricsRecreate();
     probeAndApply();
@@ -771,6 +810,7 @@ export function createTaskbarWidget(options = {}) {
     currentGap = null;
     fallbackMetrics = null;
     lastWindowKey = null;
+    lastContentSizeKey = null;
     probeRerunRequested = false;
     if (current && !current.isDestroyed()) current.destroy();
   }
@@ -897,6 +937,7 @@ export function createTaskbarWidget(options = {}) {
     currentGap = null;
     fallbackMetrics = null;
     lastWindowKey = null;
+    lastContentSizeKey = null;
 
     if (typeof load === 'function') {
       load(next);
@@ -962,6 +1003,7 @@ export function createTaskbarWidget(options = {}) {
       currentGap = null;
       fallbackMetrics = null;
       lastWindowKey = null;
+      lastContentSizeKey = null;
       if (!enabled) return;
       if (windowContext.pending) {
         failEnablement(new Error('taskbar window closed before embedding'), windowContext.notifyUser);
@@ -1063,9 +1105,16 @@ export function createTaskbarWidget(options = {}) {
   function setContentWidth(px) {
     const width = Number(px);
     if (!Number.isFinite(width) || width <= 0) return;
-    widthCss = Math.max(1, Math.round(width));
-    if (isLegacyWindows() && legacyLayout.isUsable()) probeAndApply();
-    else updateVisibility();
+    const nextWidth = Math.max(1, Math.round(width));
+    if (nextWidth === widthCss) return;
+    widthCss = nextWidth;
+    if (isLegacyWindows() && legacyLayout.isUsable()) {
+      // 固定宽度已生效时歌词换长短行不改变窗口宽度，跳过多余的 Win10 布局重算。
+      if (fixedStripCss > 0 && currentGap?.legacy) return;
+      probeAndApply();
+    } else {
+      updateVisibility();
+    }
   }
 
   /** 主动同步可见性并触发一次空档重测（例如渲染进程完成挂载上报 ready 时）。 */
